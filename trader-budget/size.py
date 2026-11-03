@@ -92,6 +92,11 @@ class SizeError(Exception):
     pass
 
 
+def is_india(sym_or_market):
+    s = str(sym_or_market or "").upper().strip()
+    return s == "IN" or s == "INDIA" or s == "NSE" or s.endswith(".NS") or s.endswith(".BO")
+
+
 # ---------------------------------------------------------------- time (New York, no tz files)
 
 def _nth_sunday(year, month, n):
@@ -111,11 +116,15 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
-def to_eastern(utc):
+def to_eastern(utc, is_in=False):
+    if is_in:
+        return utc.replace(tzinfo=None) + datetime.timedelta(hours=5, minutes=30)
     return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
 
 
-def eastern_to_utc(local):
+def eastern_to_utc(local, is_in=False):
+    if is_in:
+        return local.replace(tzinfo=None) - datetime.timedelta(hours=5, minutes=30)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -123,8 +132,8 @@ def eastern_to_utc(local):
     return local + datetime.timedelta(hours=5)
 
 
-def parse_now(text):
-    """ISO time -> naive UTC. A time without an offset is taken as New York time."""
+def parse_now(text, is_in=False):
+    """ISO time -> naive UTC. A time without an offset is taken as New York time (or IST if is_in)."""
     if not text:
         return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
     t = text.strip().replace("Z", "+00:00")
@@ -133,7 +142,7 @@ def parse_now(text):
     except ValueError:
         raise SizeError("--now wants a time like \"2026-10-19 10:15\" (New York) or ...Z (UTC)")
     if dt.tzinfo is None:
-        return eastern_to_utc(dt)
+        return eastern_to_utc(dt, is_in=is_in)
     return (dt - dt.utcoffset()).replace(tzinfo=None)
 
 
@@ -316,12 +325,13 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     sym = str(plan.get("symbol") or "").strip().upper()
     if not sym:
         raise SizeError("the plan has no symbol (run trader-exit)")
+    is_in = is_india(sym)
     side = str(plan.get("side") or "buy").strip().lower()
     if side != "buy":
         raise SizeError("this pack sizes long (buy) day trades only; the plan says %r" % side)
     if today and plan.get("date") and str(plan["date"]) != today:
-        raise SizeError("the plan is for %s and today is %s in New York: make a new plan with trader-exit"
-                        % (plan["date"], today))
+        raise SizeError("the plan is for %s and today is %s in %s: make a new plan with trader-exit"
+                        % (plan["date"], today, "India" if is_in else "New York"))
     entry_plan, stop, target = _f(plan.get("entry")), _f(plan.get("stop")), _f(plan.get("target"))
     for name, v in (("entry", entry_plan), ("stop", stop), ("target", target)):
         if v is None or v <= 0:
@@ -374,6 +384,8 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         limits.append({"name": "position cap", "usd": cap, "per": ref, "shares": shares_for(cap, ref),
                        "how": "%s%% of %s = %s / %s" % (_num(cap_pct), money(budget), money(cap), _price(ref))})
     max_order = _f(c.get("max_order_usd"))
+    if is_in and max_order == 4000 and budget and budget > 4000 and (cfg is None or "max_order_usd" not in cfg):
+        max_order = budget
     if max_order:
         limits.append({"name": "max order", "usd": max_order, "per": ref, "shares": shares_for(max_order, ref),
                        "how": "%s / %s" % (money(max_order), _price(ref))})
@@ -402,6 +414,7 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     elif cost < float(c.get("min_order_usd") or 0) - 0.005:
         refusal = ("%d share%s of %s is %s, under your %s minimum order. No order."
                    % (qty, "" if qty == 1 else "s", sym, money(cost), money(c["min_order_usd"])))
+    default_flat_by = "15:15" if is_in else c.get("flat_by")
     return {
         "symbol": sym, "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
         "entry_time": plan.get("entry_time", ""), "entry_plan": round_cent(entry_plan),
@@ -410,7 +423,7 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         "stop_label": plan.get("stop_label", ""), "target_label": plan.get("target_label", ""),
         "budget": budget, "cash_buffer_pct": buf_pct, "cash_buffer": cash_buffer, "cash_available": available,
         "max_loss_per_trade_usd": max_loss, "limits": limits, "qty": qty, "bound_by": bound[0],
-        "cost": cost, "max_loss": loss, "flat_by": plan.get("flat_by") or c.get("flat_by"),
+        "cost": cost, "max_loss": loss, "flat_by": plan.get("flat_by") or default_flat_by,
         "order_type": "limit" if limit is not None else "market", "refusal": refusal,
     }
 
@@ -773,9 +786,11 @@ def write_orders(path, orders, cfg, source="", now_utc=None):
 # ---------------------------------------------------------------- main
 
 def run_plan(a, cfg):
-    now = parse_now(a.now)
-    today = to_eastern(now).date().isoformat()
     plan = read_json(a.plan, "plan (run trader-exit first, or use --weights for a split)")
+    sym = str((plan or {}).get("symbol") or "").upper()
+    is_in = is_india(sym)
+    now = parse_now(a.now, is_in=is_in) if is_in else parse_now(a.now)
+    today = to_eastern(now, is_in=is_in).date().isoformat()
     limit = None
     if a.limit is not None:
         if a.limit == "plan":
@@ -784,21 +799,21 @@ def run_plan(a, cfg):
             limit = _f(a.limit)
             if limit is None or limit <= 0:
                 raise SizeError("--limit wants a price, like --limit 364.00")
-    sym = str((plan or {}).get("symbol") or "").upper()
     notes, price = [], None
     ppath = a.prices or ("trader/prices.json" if os.path.exists("trader/prices.json") else None)
+    tz_label = "IST" if is_in else "New York"
     if ppath and limit is None and sym:
         pdoc = read_json(ppath, "prices")
         p, t, fresh = fresh_price(pdoc, sym, now)
         if p is not None and fresh:
             price = p
             if round_cent(p) > round_cent(_f(plan.get("entry")) or 0):
-                notes.append("%s last %s (as of %s New York) is above the plan's entry %s, so the risk "
-                             "is bigger: sized at %s." % (sym, _price(p), to_eastern(t).strftime("%H:%M"),
-                                                          _price(plan.get("entry")), _price(p)))
+                notes.append("%s last %s (as of %s %s) is above the plan's entry %s, so the risk "
+                             "is bigger: sized at %s." % (sym, _price(p), to_eastern(t, is_in=is_in).strftime("%H:%M"),
+                                                          tz_label, _price(plan.get("entry")), _price(p)))
         elif p is not None:
             notes.append("%s in %s is %s: not used (older than %d minutes). Sized at the plan's entry."
-                         % (sym, ppath, ("from " + to_eastern(t).strftime("%Y-%m-%d %H:%M") + " New York")
+                         % (sym, ppath, ("from " + to_eastern(t, is_in=is_in).strftime("%Y-%m-%d %H:%M") + " " + tz_label)
                             if t else "undated", FRESH_MINUTES))
     cash = None
     if a.portfolio and os.path.exists(a.portfolio):

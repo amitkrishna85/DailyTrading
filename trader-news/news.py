@@ -192,6 +192,8 @@ class Fetcher(object):
 
 
 def yahoo_symbol(ticker):
+    if ticker.upper().endswith((".NS", ".BO")):
+        return ticker.upper()
     return ticker.upper().replace(".", "-")
 
 

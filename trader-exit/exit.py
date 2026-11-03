@@ -88,13 +88,48 @@ NYSE_EARLY_CLOSE = {  # 1:00 p.m. ET
     "2026-12-24": "Christmas Eve",
     "2027-11-26": "day after Thanksgiving",
 }
+NSE_HOLIDAYS = {
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-03-26": "Id-ul-Fitr (Ramzan Id)",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-04": "Milad-un-Nabi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-10": "Diwali Balipratipada",
+    "2026-11-24": "Prakash Gurpurb Sri Guru Nanak Dev",
+    "2026-12-25": "Christmas",
+    "2027-01-26": "Republic Day",
+    "2027-03-22": "Holi",
+    "2027-03-26": "Good Friday",
+    "2027-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2027-05-01": "Maharashtra Day",
+    "2027-10-02": "Mahatma Gandhi Jayanti",
+    "2027-11-01": "Diwali Balipratipada",
+    "2027-12-25": "Christmas",
+}
 OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
 EARLY = datetime.time(13, 0)
+OPEN_NSE = datetime.time(9, 15)
+CLOSE_NSE = datetime.time(15, 30)
 
 
 class PlanError(Exception):
     pass
+
+
+def is_india(sym_or_market):
+    if not sym_or_market:
+        return False
+    if isinstance(sym_or_market, (list, tuple, set)):
+        return any(is_india(s) for s in sym_or_market)
+    s = str(sym_or_market).upper().strip()
+    return s.endswith(".NS") or s.endswith(".BO") or s in ("NSE", "BSE", "INDIA")
 
 
 # ---------------------------------------------------------------- time
@@ -114,11 +149,15 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
-def to_eastern(utc):
+def to_eastern(utc, is_in=False):
+    if is_in:
+        return utc.replace(tzinfo=None) + datetime.timedelta(hours=5, minutes=30)
     return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
 
 
-def eastern_to_utc(local):
+def eastern_to_utc(local, is_in=False):
+    if is_in:
+        return local - datetime.timedelta(hours=5, minutes=30)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -134,22 +173,23 @@ def utc_of(ts):
     return EPOCH + datetime.timedelta(seconds=int(ts))
 
 
-def parse_now(text):
-    """--now -> naive UTC. A time without an offset is New York time."""
+def parse_now(text, is_in=False):
+    """--now -> naive UTC. A time without an offset is New York time (or IST)."""
     if not text:
         return utc_now()
     t = text.strip()
-    if t.upper().endswith(" ET"):
+    if t.upper().endswith(" ET") or t.upper().endswith(" IST"):
         t = t[:-3].strip()
     if re.match(r"^\d{1,2}:\d{2}$", t):
-        t = "%s %s" % (to_eastern(utc_now()).date().isoformat(), t.zfill(5))
+        t = "%s %s" % (to_eastern(utc_now(), is_in=is_in).date().isoformat(), t.zfill(5))
     t = t.replace("Z", "+00:00")
     try:
         dt = datetime.datetime.fromisoformat(t)
     except ValueError:
-        raise PlanError('--now wants a New York time like "2026-10-19 10:15" (or ...Z for UTC)')
+        tz_name = "IST" if is_in else "New York"
+        raise PlanError('--now wants a %s time like "2026-10-19 10:15" (or ...Z for UTC)' % tz_name)
     if dt.tzinfo is None:
-        return eastern_to_utc(dt)
+        return eastern_to_utc(dt, is_in=is_in)
     return (dt - dt.utcoffset()).replace(tzinfo=None)
 
 
@@ -184,8 +224,12 @@ def ampm(t):
     return "%d:%02d %s" % (h, t.minute, "AM" if t.hour < 12 else "PM")
 
 
-def session(d):
-    """(open_time, close_time) in New York time, or None if closed all day."""
+def session(d, is_in=False):
+    """(open_time, close_time) in exchange time, or None if closed all day."""
+    if is_in:
+        if d.weekday() >= 5 or d.isoformat() in NSE_HOLIDAYS:
+            return None
+        return OPEN_NSE, CLOSE_NSE
     if d.weekday() >= 5 or d.isoformat() in NYSE_HOLIDAYS:
         return None
     return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
@@ -391,7 +435,8 @@ def read_text(path):
 
 
 def load_chart(sym, interval, day, offline=None):
-    ysym = sym.upper().replace(".", "-")
+    ysym = sym.upper() if (sym.upper().endswith(".NS") or sym.upper().endswith(".BO")) else sym.upper().replace(".", "-")
+    is_in = is_india(sym)
     if offline:
         path = offline
         if os.path.isdir(offline):
@@ -405,7 +450,7 @@ def load_chart(sym, interval, day, offline=None):
         except (OSError, ValueError) as e:
             raise PlanError("could not read %s: %s" % (path, e))
     else:
-        back = (to_eastern(utc_now()).date() - day).days
+        back = (to_eastern(utc_now(), is_in=is_in).date() - day).days
         rng = "1d" if back <= 0 else "5d" if back <= 6 else "1mo" if back <= 28 else "60d"
         if interval == "1m" and back > 6:
             raise PlanError("Yahoo keeps 1-minute bars for about a week")
@@ -439,22 +484,22 @@ def load_chart(sym, interval, day, offline=None):
     return {"bars": bars, "data_time": meta.get("regularMarketTime")}
 
 
-def session_bars(chart, day, interval, upto_slot=None, now_utc=None):
-    """Closed, on-grid bars of one New York session, oldest first (the live tick is dropped)."""
+def session_bars(chart, day, interval, upto_slot=None, now_utc=None, is_in=False):
+    """Closed, on-grid bars of one session, oldest first (the live tick is dropped)."""
     step = INTERVALS[interval]
-    s = session(day)
+    s = session(day, is_in=is_in)
     if not s:
         return []
     open_dt = datetime.datetime.combine(day, s[0])
     close_dt = datetime.datetime.combine(day, s[1])
     if now_utc is None and chart.get("data_time"):
         now_utc = utc_of(chart["data_time"])
-    local = to_eastern(now_utc) if now_utc else None
+    local = to_eastern(now_utc, is_in=is_in) if now_utc else None
     out = {}
     for b in chart["bars"]:
         if b["t"] % step:
             continue
-        et = to_eastern(utc_of(b["t"]))
+        et = to_eastern(utc_of(b["t"]), is_in=is_in)
         if et.date() != day or not (open_dt <= et < close_dt):
             continue
         if local and et + datetime.timedelta(seconds=step) > local:
@@ -502,19 +547,22 @@ def read_config(path):
     return cfg
 
 
-def resolve_flat_by(day, explicit, cfg, entry_time):
+def resolve_flat_by(day, explicit, cfg, entry_time, is_in=False):
     """(HH:MM, note). The config's flat-by moves up with a 1:00 p.m. early close."""
-    t = parse_hhmm(explicit or cfg.get("flat_by") or DEFAULTS["flat_by"], "--flat-by" if explicit else "flat_by")
+    default_flat = "15:15" if is_in else DEFAULTS["flat_by"]
+    t = parse_hhmm(explicit or cfg.get("flat_by") or default_flat, "--flat-by" if explicit else "flat_by")
     note = ""
-    s = session(day) if day else None
+    s = session(day, is_in=is_in) if day else None
     if s:
         close_dt = datetime.datetime.combine(day, s[1])
         at = datetime.datetime.combine(day, t)
         if at >= close_dt:
             if explicit:
                 raise PlanError("--flat-by %s is at or after the %s close on %s" % (hm(t), ampm(s[1]), day))
-            moved = at - (datetime.datetime.combine(day, CLOSE) - close_dt)
-            if moved.time() <= OPEN:
+            std_close = CLOSE_NSE if is_in else CLOSE
+            std_open = OPEN_NSE if is_in else OPEN
+            moved = at - (datetime.datetime.combine(day, std_close) - close_dt)
+            if moved.time() <= std_open:
                 raise PlanError("flat_by %s in the config is at or after the close" % hm(t))
             t = moved.time()
             note = "moved up for the 1:00 p.m. early close (%s)" % NYSE_EARLY_CLOSE.get(day.isoformat(), "")
@@ -564,6 +612,7 @@ def gather(a):
 
 def build_plan(a, now_utc):
     info = gather(a)
+    is_in = is_india(info["symbol"])
     cfg = read_config(a.config)
     stop_text = a.stop
     if not stop_text:
@@ -580,19 +629,20 @@ def build_plan(a, now_utc):
         except ValueError:
             raise PlanError("date wants YYYY-MM-DD, not %r" % info["date"])
     else:
-        day = to_eastern(now_utc).date()
+        day = to_eastern(now_utc, is_in=is_in).date()
     entry_time = parse_clock(info["entry_time"], "the entry time") if info["entry_time"] else None
     atr = atr_n = None
     if stop_rule == "atr":
         chart = load_chart(info["symbol"], info["interval"], day, a.offline)
-        bars = session_bars(chart, day, info["interval"], info["entry_bar"], parse_now(a.now) if a.now else None)
+        now_val = (parse_now(a.now, is_in=True) if is_in else parse_now(a.now)) if a.now else None
+        bars = session_bars(chart, day, info["interval"], info["entry_bar"], now_val, is_in=is_in)
         if len(bars) < 3:
             raise PlanError("an atr stop needs at least 3 closed %s bars of %s on %s by the entry; found %d"
                             % (info["interval"], info["symbol"], day, len(bars)))
         atr, atr_n = atr_of(bars)
     c = compute(info["entry"], stop_rule, stop_param, target_rule, target_param, info["or_high"], info["or_low"],
                 atr, atr_n)
-    flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
+    flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time, is_in=is_in)
     orr = None
     if info["or_high"] is not None and info["or_low"] is not None:
         orr = {"high": float(cents(info["or_high"])), "low": float(cents(info["or_low"])),
@@ -618,7 +668,7 @@ def build_plan(a, now_utc):
                             % (ratio(c["reward_risk"]), num(D(mrr))))
     except PlanError:
         pass
-    today = to_eastern(now_utc).date()
+    today = to_eastern(now_utc, is_in=is_in).date()
     if day != today:
         warnings.append("This plan is for %s, not today (%s)." % (day.isoformat(), today.isoformat()))
     return plan, warnings
@@ -643,14 +693,17 @@ def describe(plan):
     out.append("  Target        %s  %s" % (money(plan["target"]), plan["target_label"]))
     out.append("  Risk a share  %s (%s%% of the entry)" % (money(plan["risk_per_share"]), pct))
     out.append("  Reward:risk   %s" % ratio(plan["reward_risk"]))
-    out.append("  Flat by       %s ET, win or lose: no overnight hold" % plan["flat_by"])
+    tz = "IST" if is_india(plan.get("symbol")) else "ET"
+    out.append("  Flat by       %s %s, win or lose: no overnight hold" % (plan["flat_by"], tz))
     out.append("Set before the entry. If price hits the stop, you are out; never move it further away.")
     out.append(NOTE)
     return out
 
 
 def cmd_plan(a):
-    now = parse_now(a.now)
+    info = gather(a)
+    is_in = is_india(info.get("symbol"))
+    now = (parse_now(a.now, is_in=True) if is_in else parse_now(a.now)) if a.now else utc_now()
     plan, warnings = build_plan(a, now)
     if a.write:
         d = os.path.dirname(a.write)
@@ -685,7 +738,9 @@ def cmd_show(a):
         return 0
     for line in describe(dict({"setup": "orb", "interval": "5m", "stop_label": "", "target_label": ""}, **plan)):
         print(line)
-    today = to_eastern(parse_now(a.now)).date().isoformat()
+    is_in = is_india(plan.get("symbol"))
+    now = (parse_now(a.now, is_in=True) if is_in else parse_now(a.now)) if a.now else utc_now()
+    today = to_eastern(now, is_in=is_in).date().isoformat()
     if plan["date"] != today:
         print("Note: this plan is for %s, not today (%s)." % (plan["date"], today))
     return 0

@@ -59,7 +59,14 @@ class TicketError(Exception):
     pass
 
 
-# ---------------------------------------------------------------- time (New York, no tz files)
+def is_india(sym):
+    if not sym:
+        return False
+    s = str(sym).upper().strip()
+    return s.endswith(".NS") or s.endswith(".BO")
+
+
+# ---------------------------------------------------------------- time (New York/IST, no tz files)
 
 def _nth_sunday(year, month, n):
     d = datetime.date(year, month, 1)
@@ -78,11 +85,15 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
-def to_eastern(utc):
+def to_eastern(utc, is_in=False):
+    if is_in:
+        return utc.replace(tzinfo=None) + datetime.timedelta(hours=5, minutes=30)
     return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
 
 
-def eastern_to_utc(local):
+def eastern_to_utc(local, is_in=False):
+    if is_in:
+        return local - datetime.timedelta(hours=5, minutes=30)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -90,22 +101,24 @@ def eastern_to_utc(local):
     return local + datetime.timedelta(hours=5)
 
 
-def parse_now(text):
-    """ISO time -> naive UTC. A time without an offset is taken as New York time."""
+def parse_now(text, is_in=False):
+    """ISO time -> naive UTC. A time without an offset is taken as New York time (or IST if is_in)."""
     if not text:
         return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
     t = text.strip().replace("Z", "+00:00")
     try:
         dt = datetime.datetime.fromisoformat(t)
     except ValueError:
-        raise TicketError("--now wants a time like \"2026-10-19 10:15\" (New York) or ...Z (UTC)")
+        raise TicketError("--now wants a time like \"2026-10-19 10:15\" (New York/IST) or ...Z (UTC)")
     if dt.tzinfo is None:
-        return eastern_to_utc(dt)
+        return eastern_to_utc(dt, is_in=is_in)
     return (dt - dt.utcoffset()).replace(tzinfo=None)
 
 
-def ny_iso(now_utc):
-    """naive UTC -> "2026-10-19T10:15:00-04:00" (New York wall clock with its offset)."""
+def ny_iso(now_utc, is_in=False):
+    """naive UTC -> "2026-10-19T10:15:00-04:00" or "+05:30"."""
+    if is_in:
+        return "%s+05:30" % to_eastern(now_utc, is_in=True).replace(microsecond=0).isoformat()
     off = eastern_offset(now_utc)
     return "%s%+03d:00" % (to_eastern(now_utc).replace(microsecond=0).isoformat(), off)
 
@@ -283,7 +296,7 @@ def parse_yes(reply, order, batch_symbols=()):
     if DOUBT_WORDS & set(words[1:]):
         return False, "the reply has a condition or a doubt in it; ask again"
     sym = str(order.get("symbol", "")).upper()
-    tokens = set(re.findall(r"[A-Z][A-Z.\-]{0,6}", raw.upper()))
+    tokens = set(re.findall(r"[A-Z0-9][A-Z0-9.\-]{0,14}", raw.upper()))
     others = {s.upper() for s in batch_symbols} - {sym}
     named = tokens & others
     if named:
@@ -439,11 +452,11 @@ def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date):
     return pf
 
 
-def log_fill(state_path, now, today, symbol, side, qty, price):
+def log_fill(state_path, now, today, symbol, side, qty, price, is_in=False):
     """A fill in the log, so trader-risk can count day trades (a buy and a sell the same day)."""
     state = load_state(state_path)
     state.setdefault("orders", []).append({
-        "at": ny_iso(now), "date": today, "status": "filled", "symbol": symbol.upper(), "side": side,
+        "at": ny_iso(now, is_in=is_in), "date": today, "status": "filled", "symbol": symbol.upper(), "side": side,
         "qty": _str_num(float(qty)), "price": float(price),
         "plain": "%s %s %s at %s" % (side.upper(), _str_num(float(qty)), symbol.upper(), _p(price))})
     write_json(state_path, state)
@@ -451,9 +464,9 @@ def log_fill(state_path, now, today, symbol, side, qty, price):
 
 # ---------------------------------------------------------------- commands
 
-def _clock(a):
-    now = parse_now(getattr(a, "now", None))
-    today = getattr(a, "today", None) or to_eastern(now).date().isoformat()
+def _clock(a, is_in=False):
+    now = parse_now(getattr(a, "now", None), is_in=is_in) if is_in else parse_now(getattr(a, "now", None))
+    today = getattr(a, "today", None) or to_eastern(now, is_in=is_in).date().isoformat()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", today):
         raise TicketError("--today wants a date like 2026-10-19")
     return now, today
@@ -467,7 +480,8 @@ def _load(a):
     cfg = read_json(a.config, "config", required=False) or {}
     risk = read_json(a.risk, "risk check", required=False)
     state = load_state(a.state)
-    now, today = _clock(a)
+    is_in = any(is_india(o.get("symbol")) for o in orders if isinstance(o, dict))
+    now, today = _clock(a, is_in=is_in)
     return orders, cfg, risk, state, today, now
 
 
@@ -508,8 +522,10 @@ def cmd_approve(a):
         print("Not recorded: %s. Ask the user again with the ticket for order %d." % (why, a.index))
         return 1
     loss, stop = max_loss(order)
-    rec = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
-           "symbol": str(order.get("symbol", "")).upper(), "side": order.get("side"),
+    sym = str(order.get("symbol", "")).upper()
+    is_in = is_india(sym)
+    rec = {"at": ny_iso(now, is_in=is_in), "date": today, "index": a.index, "fingerprint": fingerprint(order),
+           "symbol": sym, "side": order.get("side"),
            "qty": order.get("qty"), "kind": kind_of(order, rv), "max_loss": loss, "stop": stop,
            "plain": plain(order), "status": "approved", "reply": a.reply,
            "paper": bool(cfg.get("paper", True)), "broker": cfg.get("broker", "alpaca")}
@@ -529,8 +545,10 @@ def cmd_approve(a):
 def cmd_decline(a):
     orders, cfg, risk, state, today, now = _load(a)
     order = _pick(orders, a.index)
-    rec = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
-           "symbol": str(order.get("symbol", "")).upper(), "side": order.get("side"),
+    sym = str(order.get("symbol", "")).upper()
+    is_in = is_india(sym)
+    rec = {"at": ny_iso(now, is_in=is_in), "date": today, "index": a.index, "fingerprint": fingerprint(order),
+           "symbol": sym, "side": order.get("side"),
            "plain": plain(order), "status": "declined", "reply": a.reply or "no"}
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
@@ -545,7 +563,9 @@ def cmd_result(a):
     rec = latest(state, fp, today)
     if not rec or rec.get("status") != "approved":
         raise TicketError("order %d has no yes recorded today; a result can only follow an approval" % a.index)
-    new = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fp, "symbol": rec["symbol"],
+    sym = rec["symbol"]
+    is_in = is_india(sym)
+    new = {"at": ny_iso(now, is_in=is_in), "date": today, "index": a.index, "fingerprint": fp, "symbol": sym,
            "side": rec["side"], "plain": rec["plain"], "status": a.status}
     for k in ("qty", "kind", "max_loss", "stop"):
         if rec.get(k) is not None:
@@ -559,7 +579,7 @@ def cmd_result(a):
     print("Recorded order %d as %s." % (a.index, a.status))
     if a.status == "placed" and a.filled_qty and a.filled_price:
         apply_fill(a.portfolio, cfg, rec["symbol"], rec["side"], a.filled_qty, a.filled_price, today)
-        log_fill(a.state, now, today, rec["symbol"], rec["side"], a.filled_qty, a.filled_price)
+        log_fill(a.state, now, today, rec["symbol"], rec["side"], a.filled_qty, a.filled_price, is_in=is_in)
         print("Added the fill to %s." % a.portfolio)
     elif a.status == "placed":
         print("When it fills, record it: ticket.py fill --symbol %s --side %s --qty Q --price P"
@@ -571,22 +591,27 @@ def cmd_result(a):
 
 def cmd_fill(a):
     cfg = read_json(a.config, "config", required=False) or {}
-    now = parse_now(a.now)
-    date = a.date or to_eastern(now).date().isoformat()
+    sym = a.symbol.strip().upper()
+    is_in = is_india(sym)
+    now = parse_now(a.now, is_in=is_in) if is_in else parse_now(a.now)
+    date = a.date or to_eastern(now, is_in=is_in).date().isoformat()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
         raise TicketError("--date wants a date like 2026-10-19")
     pf = apply_fill(a.portfolio, cfg, a.symbol, a.side, a.qty, a.price, date)
-    log_fill(a.state, now, date, a.symbol, a.side, a.qty, a.price)
+    log_fill(a.state, now, date, a.symbol, a.side, a.qty, a.price, is_in=is_in)
+    cost_str = ("Rs.%.2f" % float(a.price)) if is_in else _money(a.price)
+    cash_str = ("Rs.%.2f" % float(pf["cash"])) if is_in else _money(pf["cash"])
     print("Recorded %s %s %s at %s on %s in %s. Cash now %s." % (a.side, a.qty, a.symbol.upper(),
-                                                                _money(a.price), date, a.portfolio,
-                                                                _money(pf["cash"])))
+                                                                cost_str, date, a.portfolio,
+                                                                cash_str))
     return 0
 
 
 def cmd_flatten(a):
     cfg = read_json(a.config, "config", required=False) or {}
     sym = a.symbol.strip().upper()
-    now, today = _clock(a)
+    is_in = is_india(sym)
+    now, today = _clock(a, is_in=is_in)
     source = "the broker, get_open_position"
     if a.qty is not None:
         qty = _f(a.qty)
@@ -601,11 +626,13 @@ def cmd_flatten(a):
             raise TicketError("nothing to flatten: no %s shares in %s. Check the broker (get_open_position "
                               "%s) and pass --qty if you do hold some" % (sym, a.portfolio, sym))
     plan = read_json(a.plan, "plan", required=False) or {}
+    default_flat = "15:15" if is_in else "15:55"
     flat_by = (plan.get("flat_by") if str(plan.get("symbol", "")).upper() == sym else None) \
-        or cfg.get("flat_by") or "15:55"
+        or cfg.get("flat_by") or default_flat
+    tz_label = "IST" if is_in else "New York"
     order = {"symbol": sym, "side": "sell", "qty": _str_num(qty), "type": "market", "time_in_force": "day",
-             "why": "flat by %s New York: closes the %s day trade before the close (qty from %s)"
-             % (flat_by, sym, source)}
+             "why": "flat by %s %s: closes the %s day trade before the close (qty from %s)"
+             % (flat_by, tz_label, sym, source)}
     old = read_json(a.orders, "orders", required=False)
     replaced = len(old.get("orders", [])) if isinstance(old, dict) else 0
     doc = {"created_by": "trader-broker", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "proposed",
@@ -613,7 +640,7 @@ def cmd_flatten(a):
            "note": "Flatten ticket. Nothing is placed until trader-risk passes it and you say yes in the chat.",
            "source": "ticket.py flatten %s on %s" % (sym, today), "orders": [order]}
     write_json(a.orders, doc)
-    print("Flatten %s: %s (flat by %s New York)." % (sym, plain(order), flat_by))
+    print("Flatten %s: %s (flat by %s %s)." % (sym, plain(order), flat_by, tz_label))
     print("Wrote it to %s%s." % (a.orders, (" (it replaced %d earlier proposal%s)"
                                              % (replaced, "" if replaced == 1 else "s")) if replaced else ""))
     if a.qty is None:

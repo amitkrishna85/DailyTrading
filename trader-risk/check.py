@@ -84,7 +84,7 @@ PRICE_FIELDS = ("qty", "notional", "limit_price", "stop_price", "take_profit_lim
 TYPES = {"market", "limit", "stop", "stop_limit", "trailing_stop"}
 TIFS = {"day", "gtc", "opg", "cls", "ioc", "fok"}
 OCC = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
-TICKER = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
+TICKER = re.compile(r"^[A-Z0-9]{1,15}([.\-][A-Z0-9]{1,4})?$")
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 CENT = 0.005
 FRESH_MINUTES = 15
@@ -123,6 +123,41 @@ OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
 EARLY = datetime.time(13, 0)
 
+OPEN_NSE = datetime.time(9, 15)
+CLOSE_NSE = datetime.time(15, 30)
+NSE_HOLIDAYS = {
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-03-20": "Id-Ul-Fitr",
+    "2026-03-27": "Ram Navami",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-27": "Bakri Id",
+    "2026-08-15": "Independence Day",
+    "2026-09-04": "Janmashtami",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-08": "Diwali Laxmi Pujan",
+    "2026-11-10": "Diwali Balipratipada",
+    "2026-11-24": "Prakash Gurpurb",
+    "2026-12-25": "Christmas",
+    "2027-01-26": "Republic Day",
+    "2027-03-22": "Holi",
+    "2027-03-26": "Good Friday",
+    "2027-04-14": "Dr. Ambedkar Jayanti",
+    "2027-05-01": "Maharashtra Day",
+    "2027-08-15": "Independence Day",
+    "2027-10-02": "Mahatma Gandhi Jayanti",
+    "2027-10-28": "Diwali",
+    "2027-12-25": "Christmas",
+}
+
+
+def is_india(sym_or_market):
+    s = str(sym_or_market or "").upper().strip()
+    return s == "IN" or s == "INDIA" or s == "NSE" or s.endswith(".NS") or s.endswith(".BO")
+
 
 class RiskError(Exception):
     pass
@@ -147,11 +182,15 @@ def eastern_offset(utc):
     return -4 if start <= naive < end else -5
 
 
-def to_eastern(utc):
+def to_eastern(utc, is_in=False):
+    if is_in:
+        return utc.replace(tzinfo=None) + datetime.timedelta(hours=5, minutes=30)
     return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
 
 
-def eastern_to_utc(local):
+def eastern_to_utc(local, is_in=False):
+    if is_in:
+        return local.replace(tzinfo=None) - datetime.timedelta(hours=5, minutes=30)
     for off in (-4, -5):
         utc = local - datetime.timedelta(hours=off)
         if eastern_offset(utc) == off:
@@ -159,8 +198,8 @@ def eastern_to_utc(local):
     return local + datetime.timedelta(hours=5)
 
 
-def parse_now(text):
-    """ISO time -> naive UTC. A time without an offset is taken as New York time."""
+def parse_now(text, is_in=False):
+    """ISO time -> naive UTC. A time without an offset is taken as New York time (or IST if is_in)."""
     if not text:
         return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
     t = text.strip().replace("Z", "+00:00")
@@ -169,7 +208,7 @@ def parse_now(text):
     except ValueError:
         raise RiskError("--now wants a time like \"2026-10-19 10:15\" (New York) or ...Z (UTC)")
     if dt.tzinfo is None:
-        return eastern_to_utc(dt)
+        return eastern_to_utc(dt, is_in=is_in)
     return (dt - dt.utcoffset()).replace(tzinfo=None)
 
 
@@ -185,10 +224,15 @@ def parse_utc(text):
     return dt
 
 
-def trading_day(d):
-    """(is_trading_day, reason). Weekends and the NYSE holiday list."""
+def trading_day(d, is_in=False):
+    """(is_trading_day, reason). Weekends and the market holiday list."""
     if d.weekday() >= 5:
         return False, "weekend"
+    if is_in:
+        name = NSE_HOLIDAYS.get(d.isoformat())
+        if name:
+            return False, "NSE holiday: " + name
+        return True, ""
     name = NYSE_HOLIDAYS.get(d.isoformat())
     if name:
         return False, "NYSE holiday: " + name
@@ -210,43 +254,49 @@ def _shift(t, hours):
     return dt.time()
 
 
-def window_check(now_et, c):
-    """Reasons an entry cannot be placed now (New York time). Empty when the window is off."""
+def window_check(now_et, c, is_in=False):
+    """Reasons an entry cannot be placed now. Empty when the window is off."""
+    tz_name = "IST" if is_in else "New York"
     before = hhmm(c.get("no_entries_before"), "no_entries_before")
     after = hhmm(c.get("no_entries_after"), "no_entries_after")
     if before is None and after is None:
         return [], []
     warns = []
     d, t = now_et.date(), now_et.time().replace(second=0, microsecond=0)
-    if d.year not in CALENDAR_YEARS:
+    if not is_in and d.year not in CALENDAR_YEARS:
         warns.append("the holiday list covers %s only: check nyse.com for %s"
                      % (" and ".join(map(str, CALENDAR_YEARS)), d.isoformat()))
-    ok, why = trading_day(d)
+    ok, why = trading_day(d, is_in=is_in)
     stamp = now_et.strftime("%a %Y-%m-%d %H:%M")
     if not ok:
-        return ["window: the market is closed today (%s, %s New York)" % (why, stamp)], warns
-    close = EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE
-    if t < OPEN or now_et.time() >= close:
-        return ["window: the market is closed (%s New York; the session is %s to %s)"
-                % (stamp, OPEN.strftime("%H:%M"), close.strftime("%H:%M"))], warns
-    if close == EARLY and after is not None:
+        return ["window: the market is closed today (%s, %s %s)" % (why, stamp, tz_name)], warns
+    if is_in:
+        open_time = OPEN_NSE
+        close = CLOSE_NSE
+    else:
+        open_time = OPEN
+        close = EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE
+    if t < open_time or now_et.time() >= close:
+        return ["window: the market is closed (%s %s; the session is %s to %s)"
+                % (stamp, tz_name, open_time.strftime("%H:%M"), close.strftime("%H:%M"))], warns
+    if not is_in and close == EARLY and after is not None:
         after = _shift(after, 3)
         warns.append("early close at 1:00 p.m. today (%s): no new entries after %s"
                      % (NYSE_EARLY_CLOSE[d.isoformat()], after.strftime("%H:%M")))
     if before is not None and t < before:
-        return ["window: no new entries before %s New York (it is %s)" % (before.strftime("%H:%M"),
-                                                                          t.strftime("%H:%M"))], warns
+        return ["window: no new entries before %s %s (it is %s)" % (before.strftime("%H:%M"),
+                                                                    tz_name, t.strftime("%H:%M"))], warns
     if after is not None and t > after:
-        return ["window: no new entries after %s New York (it is %s)" % (after.strftime("%H:%M"),
-                                                                         t.strftime("%H:%M"))], warns
+        return ["window: no new entries after %s %s (it is %s)" % (after.strftime("%H:%M"),
+                                                                   tz_name, t.strftime("%H:%M"))], warns
     return [], warns
 
 
-def business_days(today, n=5):
-    """The last n NYSE trading days up to and including today, newest first."""
+def business_days(today, n=5, is_in=False):
+    """The last n trading days up to and including today, newest first."""
     out, d = [], today
     for _ in range(40):
-        if trading_day(d)[0]:
+        if trading_day(d, is_in=is_in)[0]:
             out.append(d.isoformat())
             if len(out) == n:
                 break
@@ -347,11 +397,11 @@ def placed_today(state, today):
     return out
 
 
-def day_trades(state, today):
+def day_trades(state, today, is_in=False):
     """Day trades in the last 5 business days: a (day, symbol) with both a buy
     and a sell placed or filled that day. An entry placed today counts too: it
     is meant to be flat by the close. Returns (count, sorted list of "day SYM")."""
-    days = set(business_days(datetime.date.fromisoformat(today)))
+    days = set(business_days(datetime.date.fromisoformat(today), is_in=is_in))
     sides = {}
     for rec in (state or {}).get("orders", []):
         if rec.get("status") not in ("placed", "filled"):
@@ -378,8 +428,9 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
     c = dict(DEFAULTS)
     c.update(cfg or {})
     prices = {str(k).upper(): float(v) for k, v in (prices or {}).items() if _f(v)}
-    now_utc = now or parse_now(None)
-    now_et = to_eastern(now_utc)
+    is_in = any(is_india(o.get("symbol")) for o in orders if isinstance(o, dict))
+    now_utc = now or parse_now(None, is_in=is_in)
+    now_et = to_eastern(now_utc, is_in=is_in)
     today = today or now_et.date().isoformat()
     acct, top_warn = account(c, portfolio, prices)
     blocked = {str(b).upper() for b in c.get("blocked") or []}
@@ -395,8 +446,8 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         else:
             loss_today += ml
     placed_keys = {(str(r.get("symbol", "")).upper(), r.get("side")) for r in done_today}
-    win_reasons, win_warns = window_check(now_et, c)
-    pdt_n, pdt_list = day_trades(state, today) if c.get("pdt_guard") else (0, [])
+    win_reasons, win_warns = window_check(now_et, c, is_in=is_in)
+    pdt_n, pdt_list = day_trades(state, today, is_in=is_in) if c.get("pdt_guard") else (0, [])
     seen = set()
     results = []
     batch_entries, batch_loss = 0, 0.0
@@ -534,9 +585,13 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             if value < float(c.get("min_order_usd") or 0) - CENT:
                 later.append("size: %s is under your %s minimum order"
                              % (money(value), money(c["min_order_usd"])))
-            if c.get("max_order_usd") and value > float(c["max_order_usd"]) + CENT:
-                later.append("size: %s is over your %s max order"
-                             % (money(value), money(c["max_order_usd"])))
+            if c.get("max_order_usd"):
+                max_ord = float(c["max_order_usd"])
+                if is_in and max_ord == 4000 and c.get("budget") and float(c["budget"]) > 4000 and (cfg is None or "max_order_usd" not in cfg):
+                    max_ord = float(c["budget"])
+                if value > max_ord + CENT:
+                    later.append("size: %s is over your %s max order"
+                                 % (money(value), money(max_ord)))
 
         # account effects, simulated in order
         cash = acct["cash"]
@@ -780,13 +835,14 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     try:
-        now = parse_now(a.now)
         if a.today and not re.match(r"^\d{4}-\d{2}-\d{2}$", a.today):
             raise RiskError("--today wants a date like 2026-10-19")
         doc = read_json(a.orders, "orders file (run trader-budget first)")
         orders = doc.get("orders", doc) if isinstance(doc, dict) else doc
         if not isinstance(orders, list) or not orders:
             raise RiskError("no orders in %s" % a.orders)
+        is_in = any(is_india(o.get("symbol")) for o in orders if isinstance(o, dict))
+        now = parse_now(a.now, is_in=is_in) if is_in else parse_now(a.now)
         cfg = read_json(a.config, "config", required=False) or {}
         portfolio = read_json(a.portfolio, "portfolio", required=False)
         pdoc = read_json(a.prices, "prices", required=False) or {}

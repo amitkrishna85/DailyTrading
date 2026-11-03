@@ -1,0 +1,22 @@
+{
+  "created_by": "trader-entry",
+  "symbol": "RELIANCE.NS",
+  "setup": "orb",
+  "side": "buy",
+  "date": "2026-11-02",
+  "status": "triggered",
+  "time": "9:35 AM",
+  "bar_start": "09:30",
+  "bar_index": 3,
+  "price": 1234.5,
+  "level": 1231.6,
+  "interval": "5m",
+  "opening_range": {
+    "high": 1231.6,
+    "low": 1214.6,
+    "minutes": 15
+  },
+  "source": "yahoo",
+  "checked_at": "2026-11-02T17:38:18Z",
+  "reason": "the 9:30 bar closed above the range high"
+}
