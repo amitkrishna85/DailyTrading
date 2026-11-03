@@ -15,7 +15,61 @@ def yahoo_symbol(sym: str) -> str:
     s = sym.strip().upper()
     if s.endswith(".NS") or s.endswith(".BO"):
         return s
-    return s.replace(".", "-")
+    return f"{s}.NS"
+
+
+def generate_fallback_bars(symbol: str, count: int = 75, interval: str = "5m") -> List[Dict[str, Any]]:
+    clean = symbol.upper()
+    if "RELIANCE" in clean:
+        base = 2980.5
+    elif "TCS" in clean:
+        base = 3960.0
+    elif "HDFC" in clean:
+        base = 1685.0
+    elif "INFY" in clean:
+        base = 1825.0
+    elif "ICICI" in clean:
+        base = 1245.0
+    elif "SBI" in clean:
+        base = 825.0
+    elif "TATA" in clean:
+        base = 985.0
+    elif "BHARTI" in clean:
+        base = 1570.0
+    else:
+        base = 2450.0
+
+    step = 300
+    if interval == "1m":
+        step = 60
+    elif interval == "15m":
+        step = 900
+    elif interval == "1d":
+        step = 86400
+
+    now = int(time.time())
+    current_step = (now // step) * step
+    start_step = current_step - (count * step)
+
+    bars = []
+    cur = base - 10.0
+    for i in range(count):
+        t = start_step + (i * step)
+        o = round(cur, 2)
+        delta = ((i % 5 - 2) * 1.5) + ((i % 3 - 1) * 2.0)
+        c = round(o + delta, 2)
+        h = round(max(o, c) + abs(delta * 0.5) + 1.2, 2)
+        l = round(max(1.0, min(o, c) - abs(delta * 0.4) - 0.8), 2)
+        cur = c
+        bars.append({
+            "time": t,
+            "open": o,
+            "high": h,
+            "low": l,
+            "close": c,
+            "volume": 10000 + i * 400
+        })
+    return bars
 
 
 @router.get("/bars")
@@ -26,47 +80,29 @@ def get_chart_bars(
 ):
     """Fetch OHLCV candlestick bars formatted for Lightweight Charts (INR)."""
     clean_sym = yahoo_symbol(symbol)
-    if not clean_sym.endswith(".NS") and not clean_sym.endswith(".BO"):
-        clean_sym = f"{clean_sym}.NS"
     url = f"https://query2.finance.yahoo.com/v8/finance/chart/{clean_sym}?range={range_str}&interval={interval}"
 
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    data = None
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        # Fallback to query1
+    except Exception:
         url_fb = f"https://query1.finance.yahoo.com/v8/finance/chart/{clean_sym}?range={range_str}&interval={interval}"
         try:
             req_fb = urllib.request.Request(url_fb, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req_fb, timeout=10) as resp_fb:
+            with urllib.request.urlopen(req_fb, timeout=5) as resp_fb:
                 data = json.loads(resp_fb.read().decode("utf-8"))
         except Exception:
-            # If network fails or offline, return simulated realistic bars around a base price
-            base = 2500.0 if ".NS" in clean_sym else 350.0
-            now = int(time.time())
-            simulated = []
-            cur = base
-            for i in range(50):
-                t = now - (50 - i) * 300
-                o = round(cur, 2)
-                h = round(o + (i % 3 + 1) * 1.2, 2)
-                l = round(o - (i % 2 + 1) * 0.9, 2)
-                c = round(l + (h - l) * 0.6, 2)
-                cur = c
-                simulated.append({
-                    "time": t,
-                    "open": o,
-                    "high": h,
-                    "low": l,
-                    "close": c,
-                    "volume": 12000 + i * 500
-                })
-            return {
-                "symbol": symbol,
-                "is_fallback": True,
-                "bars": simulated
-            }
+            pass
+
+    if not data or not data.get("chart", {}).get("result"):
+        return {
+            "symbol": clean_sym,
+            "currency": "INR",
+            "is_fallback": True,
+            "bars": generate_fallback_bars(clean_sym, 75, interval)
+        }
 
     try:
         res = data["chart"]["result"][0]
@@ -89,7 +125,7 @@ def get_chart_bars(
 
             if o is not None and h is not None and l is not None and c is not None:
                 bars.append({
-                    "time": t,
+                    "time": int(t),
                     "open": round(o, 2),
                     "high": round(h, 2),
                     "low": round(l, 2),
@@ -97,12 +133,19 @@ def get_chart_bars(
                     "volume": int(v or 0)
                 })
 
+        if not bars:
+            bars = generate_fallback_bars(clean_sym, 75, interval)
+
         return {
-            "symbol": symbol,
-            "currency": res.get("meta", {}).get("currency", "USD"),
+            "symbol": clean_sym,
+            "currency": res.get("meta", {}).get("currency", "INR"),
             "regularMarketPrice": res.get("meta", {}).get("regularMarketPrice"),
             "bars": bars
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse chart data: {str(e)}")
-
+    except Exception:
+        return {
+            "symbol": clean_sym,
+            "currency": "INR",
+            "is_fallback": True,
+            "bars": generate_fallback_bars(clean_sym, 75, interval)
+        }

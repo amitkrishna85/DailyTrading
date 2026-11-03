@@ -34,3 +34,4 @@ trader/trade_log.jsonl
 trader/users/*/state/
 .DS_Store
 Thumbs.db
+
