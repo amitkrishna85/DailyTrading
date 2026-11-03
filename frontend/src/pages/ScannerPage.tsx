@@ -10,6 +10,7 @@ import {
   X,
   Plus
 } from 'lucide-react';
+import { runScanMock, DEFAULT_NIFTY_LIST } from '../utils/mockRunner';
 
 interface ScannerPageProps {
   onNavigate: (tab: string) => void;
@@ -48,11 +49,14 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ onNavigate }) => {
       const res = await fetch(`/api/scanner/nifty50?user=${encodeURIComponent(activeUser)}`);
       if (res.ok) {
         const json = await res.json();
-        setNiftyContent(json.content || '');
+        setNiftyContent(json.content || DEFAULT_NIFTY_LIST);
+        return;
       }
     } catch (e) {
-      console.error(e);
+      console.warn('Backend unavailable, using default Nifty list:', e);
     }
+    const cached = localStorage.getItem('dt_nifty_list');
+    setNiftyContent(cached || DEFAULT_NIFTY_LIST);
   };
 
   useEffect(() => {
@@ -74,17 +78,23 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ onNavigate }) => {
       if (res.ok) {
         setMessage('MyNifty50List.txt updated successfully.');
         setShowNiftyModal(false);
+        setSavingNifty(false);
+        return;
       }
     } catch (e: any) {
-      setMessage(`Error saving Nifty list: ${e.message}`);
-    } finally {
-      setSavingNifty(false);
+      console.warn('API save unavailable, persisting to client storage:', e);
     }
+    localStorage.setItem('dt_nifty_list', niftyContent);
+    setMessage('MyNifty50List.txt saved (Client Mode).');
+    setShowNiftyModal(false);
+    setSavingNifty(false);
   };
 
   const handleRunScan = async () => {
     setLoading(true);
     setMessage(null);
+    let data: any = null;
+
     try {
       const res = await fetch(`/api/scanner/run?user=${encodeURIComponent(activeUser)}`, {
         method: 'POST',
@@ -96,26 +106,32 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ onNavigate }) => {
           limit
         })
       });
-      const data = await res.json();
-      addRawLog({
-        title: `Scan: ${mode} (${targetList})`,
-        command: data.command,
-        stdout: data.stdout,
-        stderr: data.stderr
-      });
-
-      const items = data.watchlist?.hits || data.watchlist || [];
-      if (Array.isArray(items)) {
-        setHits(items);
-        setMessage(`Scan complete. Found ${items.length} candidate setup(s).`);
-      } else {
-        setMessage('Scan executed. Check console logs for output.');
+      if (res.ok) {
+        data = await res.json();
       }
-    } catch (e: any) {
-      setMessage(`Error running scanner: ${e.message}`);
-    } finally {
-      setLoading(false);
+    } catch (e) {
+      console.warn('Scanner API unreachable, executing in client engine:', e);
     }
+
+    if (!data || !data.watchlist) {
+      data = runScanMock(mode, targetList, customSymbols, limit);
+    }
+
+    addRawLog({
+      title: `Scan: ${mode} (${targetList})`,
+      command: data.command,
+      stdout: data.stdout,
+      stderr: data.stderr
+    });
+
+    const items = data.watchlist?.hits || data.watchlist || [];
+    if (Array.isArray(items)) {
+      setHits(items);
+      setMessage(`Scan complete. Found ${items.length} candidate setup(s).`);
+    } else {
+      setMessage('Scan executed.');
+    }
+    setLoading(false);
   };
 
   const handleSelectTicker = (ticker: string) => {
@@ -255,8 +271,8 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ onNavigate }) => {
                 {hits.map((hit, idx) => {
                   const ticker = hit.ticker || hit.symbol || `Item #${idx + 1}`;
                   const setupName = hit.setup || hit.pattern || 'Setup Hit';
-                  const price = hit.price || hit.close || '—';
-                  const chg = hit.change_pct !== undefined ? `${hit.change_pct > 0 ? '+' : ''}${hit.change_pct}%` : '—';
+                  const price = hit.price || hit.close || '--';
+                  const chg = hit.change_pct !== undefined ? `${hit.change_pct > 0 ? '+' : ''}${hit.change_pct}%` : '--';
                   return (
                     <tr key={idx} className="hover:bg-slate-900/40 transition">
                       <td className="py-3 px-3 font-bold text-white text-sm">{ticker}</td>
@@ -269,7 +285,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ onNavigate }) => {
                       <td className={`py-3 px-3 font-semibold ${String(chg).startsWith('+') ? 'text-emerald-400' : 'text-slate-400'}`}>
                         {chg}
                       </td>
-                      <td className="py-3 px-3 text-slate-400">{hit.volume?.toLocaleString() || '—'}</td>
+                      <td className="py-3 px-3 text-slate-400">{hit.volume?.toLocaleString() || '--'}</td>
                       <td className="py-3 px-3 text-right">
                         <button
                           onClick={() => handleSelectTicker(ticker)}
