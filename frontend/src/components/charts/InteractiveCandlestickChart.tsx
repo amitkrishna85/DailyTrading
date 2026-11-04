@@ -8,6 +8,7 @@ interface InteractiveCandlestickChartProps {
   stopPrice?: number;
   targetPrice?: number;
   height?: number;
+  onPriceUpdate?: (price: number) => void;
 }
 
 interface CandlestickBar {
@@ -22,9 +23,9 @@ interface CandlestickBar {
 // Generate realistic Indian Market OHLCV candles
 function generateFallbackBars(symbol: string, interval: string, count: number = 75): CandlestickBar[] {
   const clean = symbol.toUpperCase();
-  let basePrice = 2450.0;
-  if (clean.includes('RELIANCE')) basePrice = 2980.5;
-  else if (clean.includes('TCS')) basePrice = 3960.0;
+  let basePrice = 1500.0;
+  if (clean.includes('RELIANCE')) basePrice = 1301.0;
+  else if (clean.includes('TCS')) basePrice = 2435.0;
   else if (clean.includes('HDFC')) basePrice = 1685.0;
   else if (clean.includes('INFY')) basePrice = 1825.0;
   else if (clean.includes('ICICI')) basePrice = 1245.0;
@@ -42,18 +43,17 @@ function generateFallbackBars(symbol: string, interval: string, count: number = 
   const startStep = currentStep - (count * stepSeconds);
 
   const bars: CandlestickBar[] = [];
-  let cur = basePrice - 15.0;
+  let cur = basePrice;
 
   for (let i = 0; i < count; i++) {
     const t = (startStep + (i * stepSeconds)) as UTCTimestamp;
     const open = Math.round(cur * 100) / 100;
-    const wave = Math.sin(i * 0.18) * (basePrice * 0.0035);
-    const noise = (Math.random() - 0.48) * (basePrice * 0.004);
-    const delta = wave + noise;
-    const close = Math.round((open + delta) * 100) / 100;
+    // Micro Brownian motion without artificial sine oscillation
+    const noise = (Math.random() - 0.495) * (basePrice * 0.002);
+    const close = Math.round((open + noise) * 100) / 100;
 
-    const wickHigh = Math.random() * (basePrice * 0.0025);
-    const wickLow = Math.random() * (basePrice * 0.0025);
+    const wickHigh = Math.random() * (basePrice * 0.0015);
+    const wickLow = Math.random() * (basePrice * 0.0015);
     const high = Math.round((Math.max(open, close) + wickHigh) * 100) / 100;
     const low = Math.round((Math.max(1, Math.min(open, close) - wickLow)) * 100) / 100;
 
@@ -77,7 +77,8 @@ export const InteractiveCandlestickChart: React.FC<InteractiveCandlestickChartPr
   entryPrice,
   stopPrice,
   targetPrice,
-  height = 360
+  height = 360,
+  onPriceUpdate
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -133,9 +134,13 @@ export const InteractiveCandlestickChart: React.FC<InteractiveCandlestickChartPr
     if (candlestickSeriesRef.current && loadedBars.length > 0) {
       try {
         candlestickSeriesRef.current.setData(loadedBars);
-        setLastPrice(loadedBars[loadedBars.length - 1].close);
+        const latestPrice = loadedBars[loadedBars.length - 1].close;
+        setLastPrice(latestPrice);
         chartRef.current?.timeScale().fitContent();
         setIsLiveFeed(isLive);
+        if (onPriceUpdate && latestPrice > 0) {
+          onPriceUpdate(latestPrice);
+        }
       } catch (err) {
         console.error('Lightweight Charts setData error:', err);
       }

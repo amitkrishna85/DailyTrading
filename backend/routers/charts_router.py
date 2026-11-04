@@ -21,9 +21,9 @@ def yahoo_symbol(sym: str) -> str:
 def generate_fallback_bars(symbol: str, count: int = 75, interval: str = "5m") -> List[Dict[str, Any]]:
     clean = symbol.upper()
     if "RELIANCE" in clean:
-        base = 2980.5
+        base = 1301.0
     elif "TCS" in clean:
-        base = 3960.0
+        base = 2435.0
     elif "HDFC" in clean:
         base = 1685.0
     elif "INFY" in clean:
@@ -37,7 +37,7 @@ def generate_fallback_bars(symbol: str, count: int = 75, interval: str = "5m") -
     elif "BHARTI" in clean:
         base = 1570.0
     else:
-        base = 2450.0
+        base = 1500.0
 
     step = 300
     if interval == "1m":

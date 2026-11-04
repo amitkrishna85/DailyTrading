@@ -23,7 +23,8 @@ import {
   runTimeMachineMock,
   runBudgetSizerMock,
   runRiskCheckMock,
-  runBrokerTicketMock
+  runBrokerTicketMock,
+  getBasePrice
 } from '../utils/mockRunner';
 
 export const PipelinePage: React.FC = () => {
@@ -41,10 +42,15 @@ export const PipelinePage: React.FC = () => {
   const [watchLogs, setWatchLogs] = useState<string[]>([]);
 
   // Step 2: Exit Plan State
-  const [entryPrice, setEntryPrice] = useState<number>(2980.50);
+  const [entryPrice, setEntryPrice] = useState<number>(() => getBasePrice(pipelineSymbol));
   const [stopMethod, setStopMethod] = useState<string>('or-mid');
   const [targetMultiple, setTargetMultiple] = useState<string>('2R');
   const [planResult, setPlanResult] = useState<any>(null);
+
+  useEffect(() => {
+    setEntryPrice(getBasePrice(pipelineSymbol));
+    setPlanResult(null);
+  }, [pipelineSymbol]);
 
   // Step 3: Time Machine State
   const [replays, setReplays] = useState<number>(1000);
@@ -391,6 +397,11 @@ export const PipelinePage: React.FC = () => {
         stopPrice={planResult?.stop}
         targetPrice={planResult?.target}
         height={320}
+        onPriceUpdate={(p) => {
+          if (!planResult) {
+            setEntryPrice(p);
+          }
+        }}
       />
 
       {/* --- STEP 1: ENTRY TIMER --- */}

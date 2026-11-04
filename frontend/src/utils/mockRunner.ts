@@ -33,8 +33,8 @@ WIPRO.NS`;
 
 export function getBasePrice(symbol: string): number {
   const s = symbol.toUpperCase();
-  if (s.includes('RELIANCE')) return 2980.5;
-  if (s.includes('TCS')) return 3960.0;
+  if (s.includes('RELIANCE')) return 1301.0;
+  if (s.includes('TCS')) return 2435.0;
   if (s.includes('HDFC')) return 1685.0;
   if (s.includes('INFY')) return 1825.0;
   if (s.includes('ICICI')) return 1245.0;
@@ -43,7 +43,7 @@ export function getBasePrice(symbol: string): number {
   if (s.includes('BHARTI')) return 1570.0;
   if (s.includes('ITC')) return 490.0;
   if (s.includes('LT')) return 3650.0;
-  return 2450.0;
+  return 1500.0;
 }
 
 export function runScanMock(mode: string, targetList: string, customSymbols?: string, limit: number = 8) {
@@ -217,3 +217,4 @@ export function runBrokerTicketMock(symbol: string, plan: any, orders: any) {
     }
   };
 }
+

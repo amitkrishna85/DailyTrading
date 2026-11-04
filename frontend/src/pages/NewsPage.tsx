@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useUser } from '../context/UserContext';
 import { Newspaper, Search, ExternalLink, Tag, RefreshCw } from 'lucide-react';
 
@@ -26,7 +26,7 @@ export const NewsPage: React.FC = () => {
           stdout: data.stdout,
           stderr: data.stderr
         });
-        items = data.news?.items || data.news || [];
+        items = data.items || data.news?.items || data.news || [];
       }
     } catch (e) {
       console.warn('News API unavailable, using simulated news feed:', e);
@@ -39,6 +39,7 @@ export const NewsPage: React.FC = () => {
         headline: idx % 2 === 0
           ? `${s} reports Q2 consolidated net profit growth; margins expand to 16.8%`
           : `Heavy institutional buying noticed in ${s} ahead of sector quarterly review`,
+        link: `https://www.moneycontrol.com/india/stockpricequote/${s.replace('.NS', '').toLowerCase()}`,
         tag: idx % 2 === 0 ? 'Earnings' : 'Sector Momentum',
         source: 'NSE Corporate Announcements',
         time: `${idx * 4 + 2}h ago`
@@ -48,6 +49,10 @@ export const NewsPage: React.FC = () => {
     setNewsData(items);
     setLoading(false);
   };
+
+  useEffect(() => {
+    handleFetchNews();
+  }, [activeUser]);
 
   const getTagColor = (tag?: string) => {
     const t = String(tag || '').toLowerCase();
@@ -121,9 +126,9 @@ export const NewsPage: React.FC = () => {
           newsData.map((item, idx) => {
             const headline = item.headline || item.title || item.summary || JSON.stringify(item);
             const time = item.time || item.datetime || 'Recent';
-            const ticker = item.ticker || '—';
+            const ticker = item.ticker || '--';
             const tag = item.tag || item.category || 'News';
-            const source = item.source || 'Yahoo/SEC';
+            const source = item.source || 'NSE Feed';
 
             return (
               <div key={idx} className="p-5 rounded-xl bg-card border border-border hover:border-slate-700 transition space-y-2">
@@ -142,9 +147,21 @@ export const NewsPage: React.FC = () => {
                     </span>
                   )}
                 </div>
-                <h3 className="text-sm font-medium text-slate-100 hover:text-primary transition leading-snug">
-                  {headline}
-                </h3>
+                {item.link ? (
+                  <a
+                    href={item.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center space-x-1.5 text-sm font-medium text-slate-100 hover:text-primary transition leading-snug group"
+                  >
+                    <span>{headline}</span>
+                    <ExternalLink className="w-3.5 h-3.5 opacity-60 group-hover:opacity-100 text-primary shrink-0" />
+                  </a>
+                ) : (
+                  <h3 className="text-sm font-medium text-slate-100 leading-snug">
+                    {headline}
+                  </h3>
+                )}
               </div>
             );
           })
